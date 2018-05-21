@@ -47,6 +47,10 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
     gzerr << "[gazebo_mavlink_interface] Please specify a robotNamespace.\n";
   }
 
+  if (_sdf->HasElement("protocol_version")) {
+    protocol_version_ = _sdf->GetElement("protocol_version")->Get<float>();
+  }
+
   node_handle_ = transport::NodePtr(new transport::Node());
   node_handle_->Init(namespace_);
 
@@ -54,6 +58,7 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
       motor_velocity_reference_pub_topic_);
   getSdfParam<std::string>(_sdf, "imuSubTopic", imu_sub_topic_, imu_sub_topic_);
   getSdfParam<std::string>(_sdf, "gpsSubTopic", gps_sub_topic_, gps_sub_topic_);
+  getSdfParam<std::string>(_sdf, "visionSubTopic", vision_sub_topic_, vision_sub_topic_);
   getSdfParam<std::string>(_sdf, "lidarSubTopic", lidar_sub_topic_, lidar_sub_topic_);
   getSdfParam<std::string>(_sdf, "opticalFlowSubTopic",
       opticalFlow_sub_topic_, opticalFlow_sub_topic_);
@@ -298,6 +303,11 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
     vehicle_is_tailsitter_ = _sdf->GetElement("vehicle_is_tailsitter")->Get<bool>();
   }
 
+  if(_sdf->HasElement("send_odometry"))
+  {
+    send_odometry_ = _sdf->GetElement("send_odometry")->Get<bool>();
+  }
+
   memset((char *)&_myaddr, 0, sizeof(_myaddr));
   _myaddr.sin_family = AF_INET;
   _srcaddr.sin_family = AF_INET;
@@ -329,7 +339,19 @@ void GazeboMavlinkInterface::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf
   fds[0].events = POLLIN;
 
   mavlink_status_t* chan_state = mavlink_get_channel_status(MAVLINK_COMM_0);
-  chan_state->flags |= MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
+
+  // set the Mavlink protocol version to use on the link
+  if (protocol_version_ == 2.0) {
+    chan_state->flags &= ~(MAVLINK_STATUS_FLAG_OUT_MAVLINK1);
+    gzmsg << "Using MAVLink protocol v2.0\n";
+  }
+  else if (protocol_version_ == 1.0) {
+    chan_state->flags |= MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
+    gzmsg << "Using MAVLink protocol v1.0\n";
+  }
+  else {
+    gzerr << "Unkown protocol version! Using v" << protocol_version_ << "by default \n";
+  }
 }
 
 // This gets called by the world update start event.
@@ -414,41 +436,11 @@ void GazeboMavlinkInterface::ImuCallback(ImuPtr& imu_message) {
 #endif
   double dt = (current_time - last_imu_time_).Double();
 
-    // frames
-    // g - gazebo (ENU), east, north, up
-    // r - rotors imu frame (FLU), forward, left, up
-    // b - px4 (FRD) forward, right down
-    // n - px4 (NED) north, east, down
     ignition::math::Quaterniond q_gr = ignition::math::Quaterniond(
       imu_message->orientation().w(),
       imu_message->orientation().x(),
       imu_message->orientation().y(),
       imu_message->orientation().z());
-
-    // q_br
-    /*
-    tf.euler2quat(*tf.mat2euler([
-    #        F  L  U
-            [1, 0, 0],  # F
-            [0, -1, 0], # R
-            [0, 0, -1]  # D
-        ]
-    )).round(5)
-    */
-    ignition::math::Quaterniond q_br(0, 1, 0, 0);
-
-
-    // q_ng
-    /*
-    tf.euler2quat(*tf.mat2euler([
-    #        N  E  D
-            [0, 1, 0],  # E
-            [1, 0, 0],  # N
-            [0, 0, -1]  # U
-        ]
-    )).round(5)
-    */
-    ignition::math::Quaterniond q_ng(0, 0.70711, 0.70711, 0);
 
     ignition::math::Quaterniond q_gb = q_gr*q_br.Inverse();
     ignition::math::Quaterniond q_nb = q_ng*q_gb;
@@ -767,20 +759,123 @@ void GazeboMavlinkInterface::IRLockCallback(IRLockPtr& irlock_message) {
 }
 
 void GazeboMavlinkInterface::VisionCallback(OdomPtr& odom_message) {
-  mavlink_vision_position_estimate_t sensor_msg;
-  sensor_msg.usec = odom_message->usec();
-  // convert from ENU to NED
-  sensor_msg.x = odom_message->y();
-  sensor_msg.y = -odom_message->x();
-  sensor_msg.z = -odom_message->z();
-  sensor_msg.roll = odom_message->pitch();
-  sensor_msg.pitch = -odom_message->roll();
-  sensor_msg.yaw = -odom_message->yaw();
-
-  // send VISION_POSITION_ESTIMATE Mavlink msg
   mavlink_message_t msg;
-  mavlink_msg_vision_position_estimate_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &sensor_msg);
-  send_mavlink_message(&msg);
+
+  // transform position from local ENU to local NED frame
+  ignition::math::Vector3d position = q_ng.RotateVector(ignition::math::Vector3d(
+    odom_message->position().x(),
+    odom_message->position().y(),
+    odom_message->position().z()));
+
+  // q_gr is the quaternion that represents a rotation from ENU earth/local
+  // frame to XYZ body FLU frame
+  ignition::math::Quaterniond q_gr = ignition::math::Quaterniond(
+    odom_message->orientation().w(),
+    odom_message->orientation().x(),
+    odom_message->orientation().y(),
+    odom_message->orientation().z());
+
+  // transform orientation from local ENU to body FLU frame
+  ignition::math::Quaterniond q_gb = q_gr * q_br.Inverse();
+  // transform orientation from body FLU to body FRD frame:
+  // q_nb is the quaternion that represents a rotation from NED earth/local
+  // frame to XYZ body FRD frame
+  ignition::math::Quaterniond q_nb = q_ng * q_gb;
+
+  // transform linear velocity from local ENU to body FRD frame
+  ignition::math::Vector3d linear_velocity = q_ng.RotateVector(
+    q_br.RotateVector(ignition::math::Vector3d(
+      odom_message->linear_velocity().x(),
+      odom_message->linear_velocity().y(),
+      odom_message->linear_velocity().z())));
+
+  // transform angular velocity from body FLU to body FRD frame
+  ignition::math::Vector3d angular_velocity = q_br.RotateVector(ignition::math::Vector3d(
+    odom_message->angular_velocity().x(),
+    odom_message->angular_velocity().y(),
+    odom_message->angular_velocity().z()));
+
+  // Only sends ODOMETRY msgs if send_odometry is set and the protocol version is 2.0
+  if (send_odometry_ && protocol_version_ == 2.0) {
+    // send ODOMETRY Mavlink msg
+    mavlink_odometry_t odom;
+
+    odom.time_usec = odom_message->usec();
+
+    odom.frame_id = MAV_FRAME_VISION_NED;
+    odom.child_frame_id = MAV_FRAME_BODY_FRD;
+
+    odom.x = position.X();
+    odom.y = position.Y();
+    odom.z = position.Z();
+
+    odom.q[0] = q_nb.W();
+    odom.q[1] = q_nb.X();
+    odom.q[2] = q_nb.Y();
+    odom.q[3] = q_nb.Z();
+
+    odom.vx = linear_velocity.X();
+    odom.vy = linear_velocity.Y();
+    odom.vz = linear_velocity.Z();
+
+    odom.rollspeed= angular_velocity.X();
+    odom.pitchspeed = angular_velocity.Y();
+    odom.yawspeed = angular_velocity.Z();
+
+    // parse covariance matrices
+    // The main diagonal values are always positive (variance), so a transform
+    // in the covariance matrices from one frame to another would only
+    // change the values of the main diagonal. Since they are all zero,
+    // there's no need to apply the rotation
+    size_t count = 0;
+    for (size_t x = 0; x < 6; x++) {
+      for (size_t y = x; y < 6; y++) {
+        size_t index = 6 * x + y;
+
+        odom.pose_covariance[count++] = odom_message->pose_covariance().data()[index];
+        odom.twist_covariance[count++] = odom_message->twist_covariance().data()[index];
+      }
+    }
+
+    mavlink_msg_odometry_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &odom);
+    send_mavlink_message(&msg);
+  }
+  else {
+    // send VISION_POSITION_ESTIMATE Mavlink msg
+    mavlink_vision_position_estimate_t vision;
+
+    vision.usec = odom_message->usec();
+
+    // transform position from local ENU to local NED frame
+    vision.x = position.X();
+    vision.y = position.Y();
+    vision.z = position.Z();
+
+    // q_nb is the quaternion that represents a rotation from NED earth/local
+    // frame to XYZ body FRD frame
+    ignition::math::Vector3d euler = q_nb.Euler();
+
+    vision.roll = euler.X();
+    vision.pitch = euler.Y();
+    vision.yaw = euler.Z();
+
+    // parse covariance matrix
+    // The main diagonal values are always positive (variance), so a transform
+    // in the covariance matrix from one frame to another would only
+    // change the values of the main diagonal. Since they are all zero,
+    // there's no need to apply the rotation
+    size_t count = 0;
+    for (size_t x = 0; x < 6; x++) {
+      for (size_t y = x; y < 6; y++) {
+        size_t index = 6 * x + y;
+
+        vision.covariance[count++] = odom_message->pose_covariance().data()[index];
+      }
+    }
+
+    mavlink_msg_vision_position_estimate_encode_chan(1, 200, MAVLINK_COMM_0, &msg, &vision);
+    send_mavlink_message(&msg);
+  }
 }
 
 /*ssize_t GazeboMavlinkInterface::receive(void *_buf, const size_t _size, uint32_t _timeoutMs)

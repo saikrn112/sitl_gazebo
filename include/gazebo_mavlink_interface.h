@@ -4,7 +4,7 @@
  * Copyright 2015 Mina Kamel, ASL, ETH Zurich, Switzerland
  * Copyright 2015 Janosch Nikolic, ASL, ETH Zurich, Switzerland
  * Copyright 2015 Markus Achtelik, ASL, ETH Zurich, Switzerland
- * Copyright 2015-2017 PX4 Pro Development Team
+ * Copyright 2015-2018 PX4 Pro Development Team
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -120,12 +120,14 @@ public:
   GazeboMavlinkInterface() : ModelPlugin(),
     received_first_referenc_(false),
     namespace_(kDefaultNamespace),
+    protocol_version_(2.0),
     motor_velocity_reference_pub_topic_(kDefaultMotorVelocityReferencePubTopic),
     use_propeller_pid_(false),
     use_elevator_pid_(false),
     use_left_elevon_pid_(false),
     use_right_elevon_pid_(false),
     vehicle_is_tailsitter_(false),
+    send_odometry_(true),
     imu_sub_topic_(kDefaultImuTopic),
     opticalFlow_sub_topic_(kDefaultOpticalFlowTopic),
     lidar_sub_topic_(kDefaultLidarTopic),
@@ -177,6 +179,8 @@ private:
   bool received_first_referenc_;
   Eigen::VectorXd input_reference_;
 
+  float protocol_version_;
+
   std::string namespace_;
   std::string motor_velocity_reference_pub_topic_;
   std::string mavlink_control_sub_topic_;
@@ -205,6 +209,8 @@ private:
   bool use_right_elevon_pid_;
 
   bool vehicle_is_tailsitter_;
+
+  bool send_odometry_;
 
   std::vector<physics::JointPtr> joints_;
   std::vector<common::PID> pids_;

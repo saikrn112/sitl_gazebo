@@ -370,6 +370,13 @@ foreach(plugin ${plugins})
   add_dependencies(${plugin} mav_msgs)
 endforeach()
 
+# Configure the setup script
+if (catkin_FOUND)
+  catkin_add_env_hooks(50_sitl_gazebo_setup
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/cmake
+    SHELLS sh)
+endif()
+
 #############
 ## Install ##
 #############
