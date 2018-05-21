@@ -300,7 +300,7 @@
   <xacro:macro name="odometry_plugin_macro"
     params="
       namespace odometry_sensor_suffix parent_link pose_topic pose_with_covariance_topic
-      position_topic transform_topic odometry_topic parent_frame_id
+      position_topic transform_topic odometry_topic parent_frame_id child_frame_id
       mass_odometry_sensor measurement_divisor measurement_delay unknown_delay
       noise_normal_position noise_normal_quaternion noise_normal_linear_velocity
       noise_normal_angular_velocity noise_uniform_position
@@ -530,6 +530,7 @@
         transform_topic="transform"
         odometry_topic="odometry"
         parent_frame_id="world"
+        child_frame_id="${namespace}/odometry_sensor1"
         mass_odometry_sensor="0.00001"
         measurement_divisor="1"
         measurement_delay="0"
